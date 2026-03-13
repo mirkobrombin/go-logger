@@ -11,6 +11,7 @@ import (
 // Level represents log severity.
 type Level int
 
+// Log levels in ascending order of severity.
 const (
 	DebugLevel Level = iota
 	InfoLevel
@@ -76,6 +77,15 @@ type stdLogger struct {
 }
 
 // New constructs a logger with optional options.
+//
+// Example:
+//
+//	log := logger.New(
+//		logger.WithLevel(logger.DebugLevel),
+//		logger.WithoutDefaultSink(),
+//		logger.WithSink(mySink),
+//	)
+//	log.Info("started", logger.Field{Key: "version", Value: "1.0"})
 func New(opts ...Option) Logger {
 	l := &stdLogger{
 		level:  InfoLevel,
@@ -149,12 +159,14 @@ func (l *stdLogger) With(fields ...Field) Logger {
 	}
 }
 
+// shouldLog reports whether the given level meets the logger's minimum threshold.
 func (l *stdLogger) shouldLog(level Level) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return level >= l.level
 }
 
+// log constructs an Entry and dispatches it to all registered sinks.
 func (l *stdLogger) log(level Level, msg string, fields ...Field) {
 	if !l.shouldLog(level) {
 		return
