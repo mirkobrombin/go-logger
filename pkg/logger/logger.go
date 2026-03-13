@@ -98,6 +98,14 @@ func WithSink(s Sink) Option {
 	return func(l *stdLogger) { l.sinks = append(l.sinks, s) }
 }
 
+// WithoutDefaultSink removes the default ConsoleSink added by New.
+// Use before WithSink to create a logger with only custom sinks:
+//
+//	logger.New(logger.WithoutDefaultSink(), logger.WithSink(clefSink))
+func WithoutDefaultSink() Option {
+	return func(l *stdLogger) { l.sinks = nil }
+}
+
 // WithFields binds fields to the logger returned from New.
 func WithFields(fields ...Field) Option {
 	return func(l *stdLogger) {
