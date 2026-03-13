@@ -166,3 +166,13 @@ func TestRotatingFileSinkRotates(t *testing.T) {
 		t.Fatalf("rotated files = %v, want at least 2 files", matches)
 	}
 }
+
+func TestWithoutDefaultSink(t *testing.T) {
+	buf := &bytes.Buffer{}
+	sink := logger.NewConsoleSink(buf)
+	lg := logger.New(logger.WithoutDefaultSink(), logger.WithSink(sink))
+	lg.Info("hello")
+	if buf.Len() == 0 {
+		t.Fatal("expected custom sink to receive output, got empty buffer")
+	}
+}
