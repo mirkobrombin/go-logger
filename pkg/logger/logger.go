@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ const (
 	InfoLevel
 	WarnLevel
 	ErrorLevel
+	FatalLevel
 )
 
 // String returns the textual representation of the log level.
@@ -30,6 +32,8 @@ func (l Level) String() string {
 		return "warn"
 	case ErrorLevel:
 		return "error"
+	case FatalLevel:
+		return "fatal"
 	default:
 		return "unknown"
 	}
@@ -43,13 +47,14 @@ type Field struct {
 
 // Entry is the log payload passed to sinks.
 type Entry struct {
-	Level  string                 `json:"level"`
-	Time   time.Time              `json:"time"`
-	Msg    string                 `json:"msg"`
-	Fields map[string]interface{} `json:"fields,omitempty"`
+	Level     string                 `json:"level"`
+	Time      time.Time              `json:"time"`
+	Msg       string                 `json:"msg"`
+	Fields    map[string]interface{} `json:"fields,omitempty"`
+	TraceID   string                 `json:"trace_id,omitempty"`
+	SpanID    string                 `json:"span_id,omitempty"`
 }
 
-// Sink receives fully composed log entries.
 type Sink interface {
 	Log(e Entry) error
 }
@@ -68,12 +73,15 @@ type Logger interface {
 // Option configures the concrete logger on creation.
 type Option func(*stdLogger)
 
-// stdLogger is a simple, thread-safe structured logger with pluggable sinks.
 type stdLogger struct {
 	mu     sync.RWMutex
 	sinks  []Sink
 	level  Level
 	fields map[string]interface{}
+	ctx    context.Context
+	async  bool
+	ch     chan Entry
+	wg     sync.WaitGroup
 }
 
 // New constructs a logger with optional options.
@@ -125,7 +133,44 @@ func WithFields(fields ...Field) Option {
 	}
 }
 
+// WithAsync enables asynchronous logging with a buffered channel
+// of the specified size.
+func WithAsync(bufSize int) Option {
+	return func(l *stdLogger) {
+		l.async = true
+		l.ch = make(chan Entry, bufSize)
+		l.wg.Add(1)
+		go l.processAsync()
+	}
+}
+
+func (l *stdLogger) processAsync() {
+	defer l.wg.Done()
+	for e := range l.ch {
+		l.mu.RLock()
+		sinks := l.sinks
+		l.mu.RUnlock()
+		for _, sink := range sinks {
+			_ = sink.Log(e)
+		}
+	}
+}
+
+// WithContext binds a context to the logger, allowing sinks
+// to extract trace/span IDs for distributed tracing.
+func WithContext(ctx context.Context) Option {
+	return func(l *stdLogger) { l.ctx = ctx }
+}
+
 // RegisterSink adds a sink at runtime.
+func RegisterSink(l Logger, s Sink) {
+	if sl, ok := l.(*stdLogger); ok {
+		sl.mu.Lock()
+		defer sl.mu.Unlock()
+		sl.sinks = append(sl.sinks, s)
+	}
+}
+
 func (l *stdLogger) RegisterSink(s Sink) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -152,11 +197,15 @@ func (l *stdLogger) With(fields ...Field) Logger {
 		nextFields[f.Key] = f.Value
 	}
 
-	return &stdLogger{
-		sinks:  l.sinks,
+	child := &stdLogger{
+		sinks:  append([]Sink(nil), l.sinks...),
 		level:  l.level,
 		fields: nextFields,
+		ctx:    l.ctx,
+		async:  l.async,
+		ch:     l.ch,
 	}
+	return child
 }
 
 // shouldLog reports whether the given level meets the logger's minimum threshold.
@@ -173,9 +222,9 @@ func (l *stdLogger) log(level Level, msg string, fields ...Field) {
 	}
 
 	entry := Entry{
-		Level:  level.String(),
-		Time:   time.Now().UTC(),
-		Msg:    msg,
+		Level: level.String(),
+		Time:  time.Now().UTC(),
+		Msg:   msg,
 		Fields: map[string]interface{}{},
 	}
 
@@ -184,10 +233,28 @@ func (l *stdLogger) log(level Level, msg string, fields ...Field) {
 		entry.Fields[k] = v
 	}
 	sinks := append([]Sink(nil), l.sinks...)
+	ctx := l.ctx
 	l.mu.RUnlock()
+
+	if ctx != nil {
+		if tid, ok := ctx.Value("trace_id").(string); ok {
+			entry.TraceID = tid
+		}
+		if sid, ok := ctx.Value("span_id").(string); ok {
+			entry.SpanID = sid
+		}
+	}
 
 	for _, f := range fields {
 		entry.Fields[f.Key] = f.Value
+	}
+
+	if l.async {
+		select {
+		case l.ch <- entry:
+		default:
+		}
+		return
 	}
 
 	for _, sink := range sinks {
@@ -197,13 +264,10 @@ func (l *stdLogger) log(level Level, msg string, fields ...Field) {
 
 // Debug logs at debug level.
 func (l *stdLogger) Debug(msg string, fields ...Field) { l.log(DebugLevel, msg, fields...) }
-
 // Info logs at info level.
-func (l *stdLogger) Info(msg string, fields ...Field) { l.log(InfoLevel, msg, fields...) }
-
+func (l *stdLogger) Info(msg string, fields ...Field)  { l.log(InfoLevel, msg, fields...) }
 // Warn logs at warn level.
-func (l *stdLogger) Warn(msg string, fields ...Field) { l.log(WarnLevel, msg, fields...) }
-
+func (l *stdLogger) Warn(msg string, fields ...Field)  { l.log(WarnLevel, msg, fields...) }
 // Error logs at error level.
 func (l *stdLogger) Error(msg string, fields ...Field) { l.log(ErrorLevel, msg, fields...) }
 
@@ -229,3 +293,4 @@ func (c *ConsoleSink) Log(e Entry) error {
 	_, err = c.w.Write(append(b, '\n'))
 	return err
 }
+
